@@ -136,7 +136,7 @@ def general_assistant(state: State) -> dict:
     """NODE 2 - General Assistant Node"""
     print("[LOG] Entering general_assistant node.")
     if state["handoff"] == "general":
-        # Handoff -> use the user's query as the prompt
+        # Handoff -> this is the final node and the prompt should be the user's query, not the sub-agent prompt
         prompt = (f'You are the General Assistant. Your task is to provide comprehensive and relevant general '
                   f'information about Cal Poly, including historical context and current campus details, '
                   f'to answer the following query: "{state["user_query"]}"')
@@ -161,7 +161,7 @@ def clubs_assistant(state: State) -> dict:
     """NODE 2 - Clubs Assistant Node"""
     print("[LOG] Entering clubs_assistant node.")
     if state["handoff"] == "clubs":
-        # Handoff -> use the user's query as the prompt
+        # Handoff -> this is the final node and the prompt should be the user's query, not the sub-agent prompt
         prompt = (f'You are the Clubs Assistant. Your task is to retrieve, analyze, and summarize information about Cal '
                   f'Poly clubs and organizations, ensuring that your response focuses on club-related details to '
                   f'answer the following query: "{state["user_query"]}"')
@@ -187,7 +187,7 @@ def professor_ratings(state: State) -> dict:
     """NODE 3 - Professor Ratings and Courses Node"""
     print("[LOG] Entering professor_ratings node.")
     if state["handoff"] == "professor":
-        # Handoff -> use the user's query as the prompt
+        # Handoff -> this is the final node and the prompt should be the user's query, not the sub-agent prompt
         prompt = (
             f'You are the Professor Ratings Assistant. Your task is to fetch, analyze, and evaluate professor review '
             f'data to provide clear insights into teaching quality and course feedback to answer the following '
@@ -223,7 +223,7 @@ def schedule_analysis(state: State) -> dict:
     """Node 4 - Schedule Analysis Node"""
     print("[LOG] Entering schedule_analysis node.")
     if state["handoff"] == "schedule":
-        # Handoff -> use the user's query as the prompt
+        # Handoff -> this is the final node and the prompt should be the user's query, not the sub-agent prompt
         prompt = (
             f'You are the Schedule Analysis Assistant. Your task is to analyze schedule information in conjunction '
             f'with Cal Poly course data to generate recommendations and identify potential conflicts to '
@@ -258,6 +258,7 @@ def schedule_analysis(state: State) -> dict:
 def route_from_central(state: State) -> list[str]:
     """Routing function for conditional edges from the central agent node"""
     if state["final_answer"] or state["central_iter_num"] >= 3:
+        # If the final answer was constructed or the central agent has iterated 3 times, route to END
         return END
     else:
         parallel_calls = []
