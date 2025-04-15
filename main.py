@@ -1,10 +1,6 @@
-import json
 import operator
-from typing import Literal, Optional, Union
 from dotenv import load_dotenv
-from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import Command
 from typing_extensions import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
@@ -20,6 +16,7 @@ class State(TypedDict):
     user_data: dict             # User metadata
     final_answer: str           # Final answer to be displayed to the user
     handoff: str                # If non-empty, indicates handoff of final_answer to specific node
+    central_iter_num: int       # Iteration number for the central agent
     sub_agent_prompts: dict     # Prompts for sub-agents {"general": "...", "clubs": "...", etc.}
     aggregate_answers: Annotated[list, operator.add]  # The operator.add reducer fn makes this append-only
 
@@ -32,6 +29,16 @@ class CentralAgentOutput(BaseModel):
     professor_prompt: str = Field(None, description="If a call is needed, prompt for the professor assistant")
     schedule_prompt: str = Field(None, description="If a call is needed, prompt for the schedule assistant")
 
+# Define the output schema for the sub-agent db fetch helpers
+class ProfQuery(BaseModel):
+    professor: str = Field(None, description="The name of the professor to query")
+    course: str = Field(None, description="The course to query for the professor")
+
+class ScheduleQuery(BaseModel):
+    course: str = Field(None, description="The course to query for the schedule")
+    time: str = Field(None, description="The time to query for the schedule")
+    location: str = Field(None, description="The location to query for the schedule")
+
 
 # Initialization of LLM models with proper tool bindings for each node
 # TODO: replace these to use specific prompt-engineered preset assistants from our OpenAI account.
@@ -39,19 +46,19 @@ central_llm = ChatOpenAI(model=MODEL).with_structured_output(CentralAgentOutput)
 general_llm = ChatOpenAI(model=MODEL)
 clubs_llm = ChatOpenAI(model=MODEL)
 professor_llm = ChatOpenAI(model=MODEL)
-prof_parser_assistant = ChatOpenAI(model=MODEL)
+prof_parser_assistant = ChatOpenAI(model=MODEL).with_structured_output(ProfQuery)
 schedule_llm = ChatOpenAI(model=MODEL)
-schedule_parser_assistant = ChatOpenAI(model=MODEL)
+schedule_parser_assistant = ChatOpenAI(model=MODEL).with_structured_output(ScheduleQuery)
 
 print(f"[LOG] All LLM assistants with model {MODEL} initialized.")
 
-def query_prof_db(query: str) -> str:
+def query_prof_db(query: ProfQuery) -> str:
     # TODO: Implement the actual database query logic here
-    return "EXAMPLE PROFESSOR DATA: none"
+    return "EXAMPLE PROFESSOR DATA: No results found"
 
-def query_schedule_db(query: str) -> str:
+def query_schedule_db(query: ScheduleQuery) -> str:
     # TODO: Implement the actual database query logic here
-    return "EXAMPLE SCHEDULE DATA: none"
+    return "EXAMPLE SCHEDULE DATA: No results found"
 
 
 def central_agent(state: State) -> dict:
@@ -78,8 +85,9 @@ def central_agent(state: State) -> dict:
             "   - If the query is complex or multi-faceted, issue clear and detailed instructions to the appropriate sub-agents"
             "     to gather the necessary information you need to answer. If this is the case, leave handoff blank.\n\n"
         )
-    else:
-        # If there is already some information collected, see if it's sufficient to answer the query
+    elif state["central_iter_num"] < 3:
+        # If there is already some information collected and the agent has looped less than 3 times, see if it's
+        # sufficient to answer the query
         decision_prompt = (
             f"User Query: {state['user_query']}\n\n"
             f"Collected Information So Far:\n{collected_info}\n\n"
@@ -99,6 +107,13 @@ def central_agent(state: State) -> dict:
             "   3. If additional information is needed, clearly specify what is missing and delegate precise, targeted tasks to "
             "      the relevant sub-agent(s).\n\n"
         )
+    else:
+        # If the central agent has already iterated 3 times, it should provide a final answer
+        decision_prompt = (
+            f"User Query: {state['user_query']}\n\n"
+            f"Collected Information So Far:\n{collected_info}\n\n"
+            "Your task is to provide a final answer to the user's query based on the collected information. "
+        )
 
     print(f"[LOG] Sending decision_prompt to central_llm:\n{decision_prompt}")
     decision_response = central_llm.invoke(decision_prompt)
@@ -107,6 +122,7 @@ def central_agent(state: State) -> dict:
     return {
         "final_answer": decision_response.final_answer,
         "handoff": decision_response.handoff,
+        "central_iter_num": state["central_iter_num"] + 1,
         "sub_agent_prompts": {
             "general": decision_response.general_prompt,
             "clubs": decision_response.clubs_prompt,
@@ -121,9 +137,14 @@ def general_assistant(state: State) -> dict:
     print("[LOG] Entering general_assistant node.")
     if state["handoff"] == "general":
         # Handoff -> use the user's query as the prompt
-        prompt = state["user_query"]
+        prompt = (f'You are the General Assistant. Your task is to provide comprehensive and relevant general '
+                  f'information about Cal Poly, including historical context and current campus details, '
+                  f'to answer the following query: "{state["user_query"]}"')
     else:
-        prompt = state["sub_agent_prompts"]["general"]
+        prompt = (f'You are the General Assistant. Your task is to provide comprehensive and relevant general '
+                  f'information about Cal Poly, including historical context and current campus details, '
+                  f'to answer the following query from the Central Agent, who is interacting with the user: '
+                  f'"{state["sub_agent_prompts"]["general"]}"')
 
     print(f"[LOG] Using general_prompt: {prompt}")
     response = general_llm.invoke(prompt).content.strip()
@@ -141,9 +162,16 @@ def clubs_assistant(state: State) -> dict:
     print("[LOG] Entering clubs_assistant node.")
     if state["handoff"] == "clubs":
         # Handoff -> use the user's query as the prompt
-        prompt = state["user_query"]
+        prompt = (f'You are the Clubs Assistant. Your task is to retrieve, analyze, and summarize information about Cal '
+                  f'Poly clubs and organizations, ensuring that your response focuses on club-related details to '
+                  f'answer the following query: "{state["user_query"]}"')
+
     else:
-        prompt = state["sub_agent_prompts"]["clubs"]
+        prompt = (f'You are the Clubs Assistant. Your task is to retrieve, analyze, and summarize information about Cal '
+                  f'Poly clubs and organizations, ensuring that your response focuses on club-related details to '
+                  f'answer the following query from the Central Agent, who is interacting with the user: '
+                  f'"{state["sub_agent_prompts"]["clubs"]}"')
+
     print(f"[LOG] Using clubs_prompt: {prompt}")
     response = clubs_llm.invoke(prompt).content.strip()
     print(f"[LOG] LLM response from clubs_assistant: {response}")
@@ -160,17 +188,25 @@ def professor_ratings(state: State) -> dict:
     print("[LOG] Entering professor_ratings node.")
     if state["handoff"] == "professor":
         # Handoff -> use the user's query as the prompt
-        prompt = state["user_query"]
+        prompt = (
+            f'You are the Professor Ratings Assistant. Your task is to fetch, analyze, and evaluate professor review '
+            f'data to provide clear insights into teaching quality and course feedback to answer the following '
+            f'query: "{state["user_query"]}"')
     else:
-        prompt = state["sub_agent_prompts"]["professor"]
+        prompt = (
+            f'You are the Professor Ratings Assistant. Your task is to fetch, analyze, and evaluate professor review '
+            f'data to provide clear insights into teaching quality and course feedback to answer the following '
+            f'query from the Central Agent, who is interacting with the user: '
+            f'"{state["sub_agent_prompts"]["professor"]}".'
+        )
 
     # parser assistant builds query
-    query = prof_parser_assistant.invoke(prompt).content.strip()
+    query = prof_parser_assistant.invoke(prompt)
 
     # query the database for the results
     results = query_prof_db(query)
 
-    prompt += "\nFetched data to answer user query: " + results
+    prompt += "\nData fetched from database to answer user query: " + results
 
     print(f"[LOG] Using professor_prompt: {prompt}")
     response = professor_llm.invoke(prompt).content.strip()
@@ -188,17 +224,25 @@ def schedule_analysis(state: State) -> dict:
     print("[LOG] Entering schedule_analysis node.")
     if state["handoff"] == "schedule":
         # Handoff -> use the user's query as the prompt
-        prompt = state["user_query"]
+        prompt = (
+            f'You are the Schedule Analysis Assistant. Your task is to analyze schedule information in conjunction '
+            f'with Cal Poly course data to generate recommendations and identify potential conflicts to '
+            f'answer the following query: "{state["user_query"]}".')
     else:
-        prompt = state["sub_agent_prompts"]["schedule"]
+        prompt = (
+            f'You are the Schedule Analysis Assistant. Your task is to analyze schedule information in conjunction '
+            f'with Cal Poly course data to generate recommendations and identify potential conflicts to '
+            f'answer the following query from the Central Agent, who is interacting with the user: '
+            f'"{state["sub_agent_prompts"]["schedule"]}".')
+
 
     # parser assistant builds query
-    query = schedule_parser_assistant.invoke(prompt).content.strip()
+    query = schedule_parser_assistant.invoke(prompt)
 
     # query the database for the results
     results = query_schedule_db(query)
 
-    prompt = prompt + "\nUse the following fetched data:" + results
+    prompt += "\nData fetched from database to answer user query: " + results
 
     print(f"[LOG] Using schedule_prompt: {prompt}")
     response = schedule_llm.invoke(prompt).content.strip()
@@ -213,7 +257,7 @@ def schedule_analysis(state: State) -> dict:
 
 def route_from_central(state: State) -> list[str]:
     """Routing function for conditional edges from the central agent node"""
-    if state["final_answer"]:
+    if state["final_answer"] or state["central_iter_num"] >= 3:
         return END
     else:
         parallel_calls = []
@@ -272,6 +316,7 @@ initial_state: State = {
     },
     "final_answer": "",
     "handoff": "",
+    "central_iter_num": 0,
     "sub_agent_prompts": {
         "general": "",
         "clubs": "",
